@@ -2630,6 +2630,10 @@ func (s *Server) serveConnCounted(c net.Conn, countConcurrency bool) error {
 		// Preserve connectionClose if already set (e.g., by ExpectHandler).
 		connectionClose = connectionClose || s.DisableKeepalive || ctx.Request.Header.ConnectionClose()
 
+		// Remember the request version before ctx may be replaced with a
+		// fresh one below, whose request defaults to HTTP/1.1.
+		isHTTP11 = ctx.Request.Header.IsHTTP11()
+
 		if serverName != "" {
 			ctx.Response.Header.SetServer(serverName)
 		}
@@ -2641,10 +2645,6 @@ func (s *Server) serveConnCounted(c net.Conn, countConcurrency bool) error {
 		if continueReadingRequest {
 			s.Handler(ctx)
 		}
-
-		// Remember the request version before ctx may be replaced with a
-		// fresh one below, whose request defaults to HTTP/1.1.
-		isHTTP11 = ctx.Request.Header.IsHTTP11()
 
 		timeoutResponse = ctx.timeoutResponse
 		if timeoutResponse != nil {

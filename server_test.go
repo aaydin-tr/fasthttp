@@ -3671,6 +3671,75 @@ func TestTimeoutHandlerTimeout(t *testing.T) {
 	}
 }
 
+func TestTimeoutHandlerSetProtocolRace(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		proto        string
+		handlerProto string
+		keepAlive    bool
+	}{
+		// TimeoutHandler returns while h keeps running on its own goroutine,
+		// so the request version used for the timeout response must be read
+		// before the handler is called instead of after it returns.
+		{proto: "HTTP/1.0", handlerProto: "HTTP/1.1", keepAlive: true},
+		{proto: "HTTP/1.1", handlerProto: "HTTP/1.0", keepAlive: false},
+	} {
+		release := make(chan struct{})
+		done := make(chan struct{})
+		h := func(ctx *RequestCtx) {
+			ctx.Request.Header.SetProtocol(tc.handlerProto)
+			<-release
+			close(done)
+		}
+
+		ln := fasthttputil.NewInmemoryListener()
+		s := &Server{
+			Handler: TimeoutHandler(h, 20*time.Millisecond, "timeout"),
+		}
+		serverCh := make(chan struct{})
+		go func() {
+			if err := s.Serve(ln); err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			close(serverCh)
+		}()
+
+		conn, err := ln.Dial()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, err = conn.Write([]byte("GET / " + tc.proto + "\r\nHost: example.com\r\nConnection: keep-alive\r\n\r\n")); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		br := bufio.NewReader(conn)
+		resp := verifyResponse(t, br, StatusRequestTimeout, string(defaultContentType), "timeout")
+		if keepAlive := bytes.Equal(resp.Header.Peek(HeaderConnection), strKeepAlive); keepAlive != tc.keepAlive {
+			t.Fatalf("%s: keep-alive header=%v, expecting %v, got:\n%s", tc.proto, keepAlive, tc.keepAlive, resp.Header.String())
+		}
+		if err = conn.Close(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Let the handler goroutine finish only after the response was read.
+		close(release)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("timeout")
+		}
+
+		if err = ln.Close(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		select {
+		case <-serverCh:
+		case <-time.After(time.Second):
+			t.Fatal("timeout")
+		}
+	}
+}
+
 func TestTimeoutHandlerTimeoutReuse(t *testing.T) {
 	t.Parallel()
 
